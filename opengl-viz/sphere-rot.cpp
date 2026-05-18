@@ -12,6 +12,9 @@
 #include <vector>
 #include <random> 
 
+#define STB_EASY_FONT_IMPLEMENTATION
+#include "stb_easy_font.h"
+
 struct Point {
     float x, y, z;
 };
@@ -118,6 +121,52 @@ void scrollCallback(GLFWwindow* window, double xoffset, double yoffset) {
     distanceFromSphere = glm::clamp(distanceFromSphere, 1.5f, 20.0f);
 }
 
+
+
+void drawText2D(float x, float y, const char* text, int width, int height, float scale) {
+    char buffer[99999];
+
+    int num_quads = stb_easy_font_print(
+        x,
+        y,
+        const_cast<char*>(text),
+        nullptr,
+        buffer,
+        sizeof(buffer)
+    );
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0, width, height, 0, -1, 1);
+
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    glTranslatef(x, y, 0.0f);
+    glScalef(scale, scale, 1.0f);
+
+    glDisable(GL_DEPTH_TEST);
+
+    glColor3f(0.7f, 0.9f, 1.0f);
+
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 16, buffer);
+    glDrawArrays(GL_QUADS, 0, num_quads * 4);
+    glDisableClientState(GL_VERTEX_ARRAY);
+
+    glEnable(GL_DEPTH_TEST);
+
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+}
+
+
+
 int main() {
     if (!glfwInit()) {
         std::cerr << "Failed to initialize GLFW\n";
@@ -143,7 +192,7 @@ int main() {
     //    1.0f  // radius
     //);
     std::vector<Point> spherePoints = makeRandomPointSphere(
-        1000,  // n points
+        50000,  // n points
         1.0f  // radius
     );
 
@@ -201,6 +250,15 @@ int main() {
         }
 
         glEnd();
+        
+        drawText2D(
+            16.0f,
+            16.0f,
+            "Einstein@Home",
+            width,
+            height,
+            5
+        );
 
         glfwSwapBuffers(window);
         glfwPollEvents();
