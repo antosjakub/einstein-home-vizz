@@ -1,4 +1,4 @@
-// g++ sphere-rot.cpp -o sphere-rot.out $(pkg-config --cflags --libs glfw3) -lGL
+// g++ 1-sphere-rot-shaders.cpp -o 1-sphere-rot-shaders.out $(pkg-config --cflags --libs glfw3) -lGL
 
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
@@ -9,13 +9,14 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <random>
 #include <string>
 #include <vector>
 
-#define STB_EASY_FONT_IMPLEMENTATION
-#include "stb_easy_font.h"
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
 
 struct Point {
     float x, y, z;
@@ -23,6 +24,7 @@ struct Point {
 
 struct TextVertex {
     float x, y;
+    float u, v;
 };
 
 static glm::quat viewRotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
@@ -60,6 +62,7 @@ using GLEnableVertexAttribArrayProc = void (*)(GLuint);
 using GLGetUniformLocationProc = GLint (*)(GLuint, const GLchar*);
 using GLUniformMatrix4fvProc = void (*)(GLint, GLsizei, GLboolean, const GLfloat*);
 using GLUniform1fProc = void (*)(GLint, GLfloat);
+using GLUniform1iProc = void (*)(GLint, GLint);
 using GLUniform3fProc = void (*)(GLint, GLfloat, GLfloat, GLfloat);
 
 static GLCreateShaderProc glCreateShaderLoaded = nullptr;
@@ -87,6 +90,7 @@ static GLEnableVertexAttribArrayProc glEnableVertexAttribArrayLoaded = nullptr;
 static GLGetUniformLocationProc glGetUniformLocationLoaded = nullptr;
 static GLUniformMatrix4fvProc glUniformMatrix4fvLoaded = nullptr;
 static GLUniform1fProc glUniform1fLoaded = nullptr;
+static GLUniform1iProc glUniform1iLoaded = nullptr;
 static GLUniform3fProc glUniform3fLoaded = nullptr;
 
 template <typename Proc>
@@ -125,6 +129,7 @@ bool loadModernOpenGL() {
            loadGlProc(glGetUniformLocationLoaded, "glGetUniformLocation") &&
            loadGlProc(glUniformMatrix4fvLoaded, "glUniformMatrix4fv") &&
            loadGlProc(glUniform1fLoaded, "glUniform1f") &&
+           loadGlProc(glUniform1iLoaded, "glUniform1i") &&
            loadGlProc(glUniform3fLoaded, "glUniform3f");
 }
 
@@ -233,28 +238,46 @@ GLuint createProgram(const char* vertexSource, const char* fragmentSource) {
     return program;
 }
 
-std::vector<TextVertex> makeTextVertices(float x, float y, const char* text, float scale) {
-    char buffer[99999];
-    int quadCount = stb_easy_font_print(0.0f, 0.0f, const_cast<char*>(text), nullptr, buffer, sizeof(buffer));
+std::vector<unsigned char> loadBinaryFile(const char* path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return {};
+
+    std::streamsize size = file.tellg();
+    if (size <= 0) return {};
+
+    std::vector<unsigned char> data(static_cast<size_t>(size));
+    file.seekg(0, std::ios::beg);
+    if (!file.read(reinterpret_cast<char*>(data.data()), size)) return {};
+
+    return data;
+}
+
+std::vector<TextVertex> makeTextVertices(
+    float x,
+    float baselineY,
+    const char* text,
+    const stbtt_bakedchar* glyphs,
+    int atlasWidth,
+    int atlasHeight
+) {
+    float penX = x;
+    float penY = baselineY;
 
     std::vector<TextVertex> vertices;
-    vertices.reserve(size_t(quadCount) * 6);
+    vertices.reserve(std::string(text).size() * 6);
 
-    for (int i = 0; i < quadCount; ++i) {
-        const char* quad = buffer + i * 4 * 16;
-        TextVertex q[4];
+    for (const char* c = text; *c; ++c) {
+        if (*c < 32 || *c > 126) continue;
 
-        for (int j = 0; j < 4; ++j) {
-            const float* position = reinterpret_cast<const float*>(quad + j * 16);
-            q[j] = {x + position[0] * scale, y + position[1] * scale};
-        }
+        stbtt_aligned_quad quad;
+        stbtt_GetBakedQuad(glyphs, atlasWidth, atlasHeight, *c - 32, &penX, &penY, &quad, 1);
 
-        vertices.push_back(q[0]);
-        vertices.push_back(q[1]);
-        vertices.push_back(q[2]);
-        vertices.push_back(q[0]);
-        vertices.push_back(q[2]);
-        vertices.push_back(q[3]);
+        vertices.push_back({quad.x0, quad.y0, quad.s0, quad.t0});
+        vertices.push_back({quad.x1, quad.y0, quad.s1, quad.t0});
+        vertices.push_back({quad.x1, quad.y1, quad.s1, quad.t1});
+        vertices.push_back({quad.x0, quad.y0, quad.s0, quad.t0});
+        vertices.push_back({quad.x1, quad.y1, quad.s1, quad.t1});
+        vertices.push_back({quad.x0, quad.y1, quad.s0, quad.t1});
     }
 
     return vertices;
@@ -336,10 +359,14 @@ int main() {
         #version 330 core
 
         layout (location = 0) in vec2 inPosition;
+        layout (location = 1) in vec2 inTexCoord;
 
         uniform mat4 uProjection;
 
+        out vec2 vTexCoord;
+
         void main() {
+            vTexCoord = inTexCoord;
             gl_Position = uProjection * vec4(inPosition, 0.0, 1.0);
         }
     )GLSL";
@@ -348,10 +375,14 @@ int main() {
         #version 330 core
 
         uniform vec3 uColor;
+        uniform sampler2D uFontTexture;
+
+        in vec2 vTexCoord;
         out vec4 outColor;
 
         void main() {
-            outColor = vec4(uColor, 1.0);
+            float alpha = texture(uFontTexture, vTexCoord).r;
+            outColor = vec4(uColor, alpha);
         }
     )GLSL";
 
@@ -364,7 +395,69 @@ int main() {
     }
 
     std::vector<Point> spherePoints = makeRandomPointSphere(10000, 1.0f);
-    std::vector<TextVertex> titleVertices = makeTextVertices(16.0f, 18.0f, "Einstein@Home", 4.0f);
+
+    constexpr int fontAtlasWidth = 512;
+    constexpr int fontAtlasHeight = 512;
+    const char* fontPath = "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf";
+
+    std::vector<unsigned char> fontData = loadBinaryFile(fontPath);
+    if (fontData.empty()) {
+        std::cerr << "Failed to load font: " << fontPath << "\n";
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return 1;
+    }
+
+
+    std::vector<unsigned char> fontAtlas(fontAtlasWidth * fontAtlasHeight);
+    stbtt_bakedchar glyphs[96];
+    int bakeResult = stbtt_BakeFontBitmap(
+        fontData.data(),
+        0,
+        50.0f, // font size
+        fontAtlas.data(),
+        fontAtlasWidth,
+        fontAtlasHeight,
+        32,
+        96,
+        glyphs
+    );
+
+    if (bakeResult <= 0) {
+        std::cerr << "Failed to bake font atlas\n";
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return 1;
+    }
+
+    std::vector<TextVertex> titleVertices = makeTextVertices(
+        50.0f, // x coord of text
+        1800.0f, // y coord of text
+        "Einstein@Home",
+        glyphs,
+        fontAtlasWidth,
+        fontAtlasHeight
+    );
+
+    GLuint fontTexture = 0;
+    glGenTextures(1, &fontTexture);
+    glBindTexture(GL_TEXTURE_2D, fontTexture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RED,
+        fontAtlasWidth,
+        fontAtlasHeight,
+        0,
+        GL_RED,
+        GL_UNSIGNED_BYTE,
+        fontAtlas.data()
+    );
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     GLuint sphereVao = 0;
     GLuint sphereVbo = 0;
@@ -385,6 +478,8 @@ int main() {
     glBufferDataLoaded(GL_ARRAY_BUFFER, GLsizeiptr(titleVertices.size() * sizeof(TextVertex)), titleVertices.data(), GL_STATIC_DRAW);
     glVertexAttribPointerLoaded(0, 2, GL_FLOAT, GL_FALSE, sizeof(TextVertex), reinterpret_cast<void*>(offsetof(TextVertex, x)));
     glEnableVertexAttribArrayLoaded(0);
+    glVertexAttribPointerLoaded(1, 2, GL_FLOAT, GL_FALSE, sizeof(TextVertex), reinterpret_cast<void*>(offsetof(TextVertex, u)));
+    glEnableVertexAttribArrayLoaded(1);
 
     glBindBufferLoaded(GL_ARRAY_BUFFER, 0);
     glBindVertexArrayLoaded(0);
@@ -393,6 +488,7 @@ int main() {
     GLint pointTimeLocation = glGetUniformLocationLoaded(pointProgram, "uTime");
     GLint textProjectionLocation = glGetUniformLocationLoaded(textProgram, "uProjection");
     GLint textColorLocation = glGetUniformLocationLoaded(textProgram, "uColor");
+    GLint textTextureLocation = glGetUniformLocationLoaded(textProgram, "uFontTexture");
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -432,7 +528,9 @@ int main() {
         glm::mat4 textProjection = glm::ortho(0.0f, float(width), float(height), 0.0f);
         glUseProgramLoaded(textProgram);
         glUniformMatrix4fvLoaded(textProjectionLocation, 1, GL_FALSE, glm::value_ptr(textProjection));
-        glUniform3fLoaded(textColorLocation, 0.70f, 0.90f, 1.0f);
+        glUniform3fLoaded(textColorLocation, 0.74f, 0.88f, 0.96f);
+        glUniform1iLoaded(textTextureLocation, 0);
+        glBindTexture(GL_TEXTURE_2D, fontTexture);
         glBindVertexArrayLoaded(textVao);
         glDrawArrays(GL_TRIANGLES, 0, GLsizei(titleVertices.size()));
         glEnable(GL_DEPTH_TEST);
@@ -443,6 +541,7 @@ int main() {
 
     glDeleteBuffersLoaded(1, &textVbo);
     glDeleteVertexArraysLoaded(1, &textVao);
+    glDeleteTextures(1, &fontTexture);
     glDeleteBuffersLoaded(1, &sphereVbo);
     glDeleteVertexArraysLoaded(1, &sphereVao);
     glDeleteProgramLoaded(textProgram);
