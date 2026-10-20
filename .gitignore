@@ -1,2 +1,6 @@
 *.pdf
 *.out
+data/gwosc/cache/skymaps/
+
+data/
+__pycache__/

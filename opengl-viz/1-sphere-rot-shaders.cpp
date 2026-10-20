@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,11 @@
 
 struct Point {
     float x, y, z;
+};
+
+struct SkyCoordinate {
+    float rightAscensionDeg;
+    float declinationDeg;
 };
 
 struct TextVertex {
@@ -154,6 +160,83 @@ std::vector<Point> makeRandomPointSphere(int pointCount, float radius) {
     }
 
     return points;
+}
+
+Point equatorialToPoint(float rightAscensionDeg, float declinationDeg, float radius) {
+    const float ra = glm::radians(rightAscensionDeg);
+    const float dec = glm::radians(declinationDeg);
+    const float cosDec = std::cos(dec);
+
+    return {
+        radius * cosDec * std::cos(ra),
+        radius * std::sin(dec),
+        radius * cosDec * std::sin(ra)
+    };
+}
+
+std::vector<Point> makeSkyMarkerPoints(
+    const std::vector<SkyCoordinate>& skyCoordinates,
+    float radius
+) {
+    std::vector<Point> points;
+    points.reserve(skyCoordinates.size());
+
+    for (const SkyCoordinate& coordinate : skyCoordinates) {
+        points.push_back(
+            equatorialToPoint(
+                coordinate.rightAscensionDeg,
+                coordinate.declinationDeg,
+                radius
+            )
+        );
+    }
+
+    return points;
+}
+
+std::vector<SkyCoordinate> loadSkyCoordinatesFromCsv(const std::vector<std::string>& candidatePaths) {
+    for (const std::string& path : candidatePaths) {
+        std::ifstream file(path);
+        if (!file) continue;
+
+        std::vector<SkyCoordinate> coordinates;
+        std::string line;
+
+        bool firstLine = true;
+        while (std::getline(file, line)) {
+            if (line.empty()) continue;
+            if (firstLine) {
+                firstLine = false;
+                if (line.find("ra_deg") != std::string::npos) continue;
+            }
+
+            std::stringstream ss(line);
+            std::string field;
+            std::vector<std::string> fields;
+            while (std::getline(ss, field, ',')) {
+                fields.push_back(field);
+            }
+
+            if (fields.size() < 6) continue;
+
+            try {
+                coordinates.push_back({
+                    std::stof(fields[4]),
+                    std::stof(fields[5])
+                });
+            } catch (const std::exception&) {
+                continue;
+            }
+        }
+
+        if (!coordinates.empty()) {
+            std::cout << "Loaded " << coordinates.size()
+                      << " merge-source markers from " << path << "\n";
+            return coordinates;
+        }
+    }
+
+    return {};
 }
 
 void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
@@ -320,6 +403,11 @@ int main() {
 
         uniform mat4 uMvp;
         uniform float uTime;
+        uniform vec3 uBaseColor;
+        uniform float uPointSizeBase;
+        uniform float uPointSizeJitter;
+        uniform float uShimmerAmount;
+        uniform float uLatitudeAmount;
 
         out vec3 vColor;
 
@@ -331,11 +419,11 @@ int main() {
             float latitude = inPosition.y * 0.5 + 0.5;
             float pointNoise = hashPoint(gl_VertexID);
             float shimmer = 0.5 + 0.5 * sin(uTime * 1.6 + pointNoise * 6.2831853);
-            float brightness = 0.66 + 0.24 * latitude + 0.10 * shimmer;
+            float brightness = 0.66 + uLatitudeAmount * latitude + uShimmerAmount * shimmer;
 
-            vColor = vec3(0.20, 0.74, 1.0) * brightness;
+            vColor = uBaseColor * brightness;
             gl_Position = uMvp * vec4(inPosition, 1.0);
-            gl_PointSize = 2.7 + 1.4 * pointNoise + 0.5 * shimmer;
+            gl_PointSize = uPointSizeBase + uPointSizeJitter * pointNoise + 0.5 * uShimmerAmount * shimmer;
         }
     )GLSL";
 
@@ -395,6 +483,23 @@ int main() {
     }
 
     std::vector<Point> spherePoints = makeRandomPointSphere(10000, 1.0f);
+    std::vector<SkyCoordinate> mergeSourceCoordinates = loadSkyCoordinatesFromCsv({
+        "../data/gwosc/merge_sources.csv",
+        "data/gwosc/merge_sources.csv"
+    });
+    if (mergeSourceCoordinates.empty()) {
+        mergeSourceCoordinates = {
+            {40.0f, 18.0f},
+            {83.0f, -9.0f},
+            {128.0f, 35.0f},
+            {201.0f, -24.0f},
+            {248.0f, 12.0f},
+            {301.0f, -41.0f},
+            {333.0f, 56.0f}
+        };
+        std::cout << "Using built-in demo merge-source markers\n";
+    }
+    std::vector<Point> mergeSourcePoints = makeSkyMarkerPoints(mergeSourceCoordinates, 1.03f);
 
     constexpr int fontAtlasWidth = 512;
     constexpr int fontAtlasHeight = 512;
@@ -469,6 +574,21 @@ int main() {
     glVertexAttribPointerLoaded(0, 3, GL_FLOAT, GL_FALSE, sizeof(Point), reinterpret_cast<void*>(offsetof(Point, x)));
     glEnableVertexAttribArrayLoaded(0);
 
+    GLuint mergeSourceVao = 0;
+    GLuint mergeSourceVbo = 0;
+    glGenVertexArraysLoaded(1, &mergeSourceVao);
+    glGenBuffersLoaded(1, &mergeSourceVbo);
+    glBindVertexArrayLoaded(mergeSourceVao);
+    glBindBufferLoaded(GL_ARRAY_BUFFER, mergeSourceVbo);
+    glBufferDataLoaded(
+        GL_ARRAY_BUFFER,
+        GLsizeiptr(mergeSourcePoints.size() * sizeof(Point)),
+        mergeSourcePoints.data(),
+        GL_STATIC_DRAW
+    );
+    glVertexAttribPointerLoaded(0, 3, GL_FLOAT, GL_FALSE, sizeof(Point), reinterpret_cast<void*>(offsetof(Point, x)));
+    glEnableVertexAttribArrayLoaded(0);
+
     GLuint textVao = 0;
     GLuint textVbo = 0;
     glGenVertexArraysLoaded(1, &textVao);
@@ -486,6 +606,11 @@ int main() {
 
     GLint pointMvpLocation = glGetUniformLocationLoaded(pointProgram, "uMvp");
     GLint pointTimeLocation = glGetUniformLocationLoaded(pointProgram, "uTime");
+    GLint pointBaseColorLocation = glGetUniformLocationLoaded(pointProgram, "uBaseColor");
+    GLint pointSizeBaseLocation = glGetUniformLocationLoaded(pointProgram, "uPointSizeBase");
+    GLint pointSizeJitterLocation = glGetUniformLocationLoaded(pointProgram, "uPointSizeJitter");
+    GLint pointShimmerAmountLocation = glGetUniformLocationLoaded(pointProgram, "uShimmerAmount");
+    GLint pointLatitudeAmountLocation = glGetUniformLocationLoaded(pointProgram, "uLatitudeAmount");
     GLint textProjectionLocation = glGetUniformLocationLoaded(textProgram, "uProjection");
     GLint textColorLocation = glGetUniformLocationLoaded(textProgram, "uColor");
     GLint textTextureLocation = glGetUniformLocationLoaded(textProgram, "uFontTexture");
@@ -521,8 +646,21 @@ int main() {
         glUseProgramLoaded(pointProgram);
         glUniformMatrix4fvLoaded(pointMvpLocation, 1, GL_FALSE, glm::value_ptr(mvp));
         glUniform1fLoaded(pointTimeLocation, time);
+        glUniform3fLoaded(pointBaseColorLocation, 0.20f, 0.74f, 1.0f);
+        glUniform1fLoaded(pointSizeBaseLocation, 2.7f);
+        glUniform1fLoaded(pointSizeJitterLocation, 1.4f);
+        glUniform1fLoaded(pointShimmerAmountLocation, 0.10f);
+        glUniform1fLoaded(pointLatitudeAmountLocation, 0.24f);
         glBindVertexArrayLoaded(sphereVao);
         glDrawArrays(GL_POINTS, 0, GLsizei(spherePoints.size()));
+
+        glUniform3fLoaded(pointBaseColorLocation, 1.0f, 0.32f, 0.78f);
+        glUniform1fLoaded(pointSizeBaseLocation, 8.0f);
+        glUniform1fLoaded(pointSizeJitterLocation, 1.2f);
+        glUniform1fLoaded(pointShimmerAmountLocation, 0.20f);
+        glUniform1fLoaded(pointLatitudeAmountLocation, 0.00f);
+        glBindVertexArrayLoaded(mergeSourceVao);
+        glDrawArrays(GL_POINTS, 0, GLsizei(mergeSourcePoints.size()));
 
         glDisable(GL_DEPTH_TEST);
         glm::mat4 textProjection = glm::ortho(0.0f, float(width), float(height), 0.0f);
@@ -542,6 +680,8 @@ int main() {
     glDeleteBuffersLoaded(1, &textVbo);
     glDeleteVertexArraysLoaded(1, &textVao);
     glDeleteTextures(1, &fontTexture);
+    glDeleteBuffersLoaded(1, &mergeSourceVbo);
+    glDeleteVertexArraysLoaded(1, &mergeSourceVao);
     glDeleteBuffersLoaded(1, &sphereVbo);
     glDeleteVertexArraysLoaded(1, &sphereVao);
     glDeleteProgramLoaded(textProgram);
